@@ -47,24 +47,25 @@ def calcular_saldo_devedor(dados):
     data_inicial_obj = datetime.strptime(DATA_INICIAL, "%Y-%m-%d")
     data_atual = datetime.now()
     
-    # 1. Calcula a diferença exata em DIAS
     dias_passados = (data_atual - data_inicial_obj).days
-    dias_passados = max(0, dias_passados) # Previne dias negativos se a data for futura
+    dias_passados = max(0, dias_passados)
     
     taxa_mensal = obter_taxa_poupanca()
     
-    # 2. Cálculo Pró-rata: (1 + taxa_mensal) ^ (dias / 30)
-    # Isso garante que 15 dias cobrem meia taxa, 30 dias cobrem taxa cheia, etc.
+    # Cálculo Pró-rata e Juros
     fator_juros = (1 + taxa_mensal) ** (dias_passados / 30.0)
     saldo_com_juros = VALOR_INICIAL * fator_juros
     
-    # 3. Calcula o total pago e subtrai do saldo
+    # NOVO: Isola apenas o valor dos juros gerados pelo tempo
+    juros_acumulados = saldo_com_juros - VALOR_INICIAL
+    
+    # Total pago e Saldo Final
     total_pago = sum(p['valor'] for p in dados['pagamentos'])
     
     saldo_final = saldo_com_juros - total_pago
-    saldo_final = max(0, saldo_final)
+    saldo_final = max(0, saldo_final) # Evita saldo negativo
     
-    return saldo_final, total_pago, taxa_mensal, dias_passados
+    return saldo_final, total_pago, taxa_mensal, dias_passados, juros_acumulados
 
 # --- FUNÇÃO DE E-MAIL ---
 def enviar_email_aviso(valor, data, comprovante_nome, comprovante_bytes):
@@ -89,28 +90,32 @@ def enviar_email_aviso(valor, data, comprovante_nome, comprovante_bytes):
         return False
 
 # --- INTERFACE STREAMLIT ---
-st.set_page_config(page_title="Gestão de Dívida", page_icon="💰", layout="centered")
+# Mudamos para layout="wide" para aproveitar melhor a tela com as 3 colunas
+st.set_page_config(page_title="Gestão de Dívida", page_icon="💰", layout="wide")
 
 st.title("💰 Gestão de Dívida")
 
 dados = carregar_dados()
-saldo_atual, total_pago, taxa_atual, dias_passados = calcular_saldo_devedor(dados)
+# Note que adicionamos a variável juros_acumulados aqui no retorno da função
+saldo_atual, total_pago, taxa_atual, dias_passados, juros_acumulados = calcular_saldo_devedor(dados)
 
-# Formatação da data inicial para exibição (DD/MM/AAAA)
 data_inicial_br = datetime.strptime(DATA_INICIAL, "%Y-%m-%d").strftime("%d/%m/%Y")
 
-# --- NOVO DASHBOARD (Sem abreviação "...") ---
+# --- DASHBOARD ATUALIZADO (3 Colunas) ---
 st.markdown("### Resumo do Contrato")
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.info(f"**Saldo Devedor Atual:**\n### {formata_moeda(saldo_atual)}")
-    st.success(f"**Total Amortizado:**\n### {formata_moeda(total_pago)}")
+    st.info(f"**Saldo Devedor Atual:**\n## {formata_moeda(saldo_atual)}")
+    st.markdown(f"**Valor Original:** {formata_moeda(VALOR_INICIAL)}")
 
 with col2:
-    st.warning(f"**Início da Dívida:**\n### {data_inicial_br}")
-    st.error(f"**Taxa Poupança:** {taxa_atual*100:.4f}% a.m.\n\n*Cobrança Pró-rata: {dias_passados} dias corridos.*")
+    st.warning(f"**Juros Acumulados:**\n## + {formata_moeda(juros_acumulados)}")
+    st.success(f"**Total Amortizado:**\n## - {formata_moeda(total_pago)}")
+
+with col3:
+    st.error(f"**Início da Dívida:** {data_inicial_br}\n\n**Taxa Poupança:** {taxa_atual*100:.4f}% a.m.\n\n*Cobrança Pró-rata: {dias_passados} dias*")
 
 st.divider()
 
@@ -134,7 +139,7 @@ with st.form("form_pagamento", clear_on_submit=True):
             
             if sucesso_email:
                 novo_pagamento = {
-                    "data": data_pagamento.strftime("%Y-%m-%d"), # Salva no formato universal
+                    "data": data_pagamento.strftime("%Y-%m-%d"),
                     "valor": float(valor_pago),
                     "comprovante": comprovante.name
                 }
@@ -153,14 +158,11 @@ st.subheader("Histórico de Amortizações")
 if dados['pagamentos']:
     df = pd.DataFrame(dados['pagamentos'])
     
-    # Formata os dados para o padrão Brasileiro na tabela
     df['data'] = pd.to_datetime(df['data']).dt.strftime('%d/%m/%Y')
     df['valor'] = df['valor'].apply(formata_moeda)
     
-    # Renomeia as colunas
     df.rename(columns={'data': 'Data do Pagamento', 'valor': 'Valor Amortizado', 'comprovante': 'Arquivo Anexado'}, inplace=True)
     
-    # Exibe a tabela
     st.dataframe(df, use_container_width=True, hide_index=True)
 else:
     st.info("Nenhum pagamento registrado ainda.")
