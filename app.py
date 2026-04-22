@@ -11,9 +11,9 @@ from datetime import datetime
 VALOR_INICIAL = 78600.00
 DATA_INICIAL = "2026-04-01" # Formato de sistema: AAAA-MM-DD
 
-EMAIL_REMETENTE = "seu_email@gmail.com"
+EMAIL_REMETENTE = "micflorencio@gmail.com"
 # Pode colocar vários e-mails separados por vírgula
-EMAIL_DESTINO = "credor1@gmail.com, credor2@hotmail.com" 
+EMAIL_DESTINO = "cagido.carneiro@gmail.com, luiza.serta.padilha@gmail.com, micflorencio@gmail.com" 
 
 # ==========================================
 # INTEGRAÇÃO COM NUVEM (STREAMLIT SECRETS)
