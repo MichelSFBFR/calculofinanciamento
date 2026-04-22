@@ -9,7 +9,7 @@ from datetime import datetime
 # CONFIGURAÇÕES DA DÍVIDA E E-MAIL
 # ==========================================
 VALOR_INICIAL = 78600.00
-DATA_INICIAL = "2024-01-15" # Formato de sistema: AAAA-MM-DD
+DATA_INICIAL = "2026-04-01" # Formato de sistema: AAAA-MM-DD
 
 EMAIL_REMETENTE = "seu_email@gmail.com"
 # Pode colocar vários e-mails separados por vírgula
