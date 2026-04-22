@@ -1,73 +1,133 @@
 import streamlit as st
 import pandas as pd
 import requests
-import json
-import os
 import smtplib
 from email.message import EmailMessage
 from datetime import datetime
 
-# --- CONFIGURAÇÕES ---
-ARQUIVO_DADOS = "dados_divida.json"
+# ==========================================
+# CONFIGURAÇÕES DA DÍVIDA E E-MAIL
+# ==========================================
 VALOR_INICIAL = 78600.00
-DATA_INICIAL = "2026-04-01" # Formato para o sistema ler: AAAA-MM-DD
+DATA_INICIAL = "2024-01-15" # Formato de sistema: AAAA-MM-DD
 
-# Configurações de E-mail
-EMAIL_REMETENTE = "micflorencio@gmail.com"
-SENHA_EMAIL = "zole ausl ckpd zgkt" 
-EMAIL_DESTINO = "cagido.carneiro@gmail.com, luiza.serta.padilha@gmail.com, micflorencio@gmail.com"
+EMAIL_REMETENTE = "seu_email@gmail.com"
+# Pode colocar vários e-mails separados por vírgula
+EMAIL_DESTINO = "credor1@gmail.com, credor2@hotmail.com" 
 
-# --- FUNÇÕES UTILITÁRIAS ---
-def formata_moeda(valor):
-    """Transforma float em padrão moeda BR (ex: R$ 78.600,00)"""
-    return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
+# ==========================================
+# INTEGRAÇÃO COM NUVEM (STREAMLIT SECRETS)
+# ==========================================
+try:
+    SENHA_EMAIL = st.secrets["SENHA_EMAIL"]
+    JSONBIN_ID = st.secrets["JSONBIN_ID"]
+    JSONBIN_KEY = st.secrets["JSONBIN_KEY"]
+except Exception:
+    st.error("⚠️ Configurações de segurança não encontradas. Verifique a aba 'Secrets' no Streamlit Cloud.")
+    st.stop()
 
+URL_JSONBIN = f"https://api.jsonbin.io/v3/b/{JSONBIN_ID}"
+
+# ==========================================
+# FUNÇÕES DE BANCO DE DADOS (JSONBIN)
+# ==========================================
 def carregar_dados():
-    if os.path.exists(ARQUIVO_DADOS):
-        with open(ARQUIVO_DADOS, "r") as f:
-            return json.load(f)
-    return {"pagamentos": []}
+    headers = {'X-Master-Key': JSONBIN_KEY}
+    try:
+        response = requests.get(URL_JSONBIN, headers=headers)
+        if response.status_code == 200:
+            return response.json()['record']
+        else:
+            return {"pagamentos": []}
+    except Exception:
+        st.error("Erro ao conectar ao banco de dados.")
+        return {"pagamentos": []}
 
 def salvar_dados(dados):
-    with open(ARQUIVO_DADOS, "w") as f:
-        json.dump(dados, f, indent=4)
+    headers = {
+        'Content-Type': 'application/json',
+        'X-Master-Key': JSONBIN_KEY
+    }
+    try:
+        requests.put(URL_JSONBIN, json=dados, headers=headers)
+    except Exception:
+        st.error("Erro ao salvar no banco de dados.")
+
+# ==========================================
+# FUNÇÕES UTILITÁRIAS E MATEMÁTICAS
+# ==========================================
+def formata_moeda(valor):
+    """Formata número para o padrão de moeda do Brasil"""
+    return f"R$ {valor:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
 
 def obter_taxa_poupanca():
-    """Busca a taxa de rendimento mensal da poupança na API do Banco Central"""
+    """Busca a taxa do mês atual no Banco Central"""
     try:
         url = "https://api.bcb.gov.br/dados/serie/bcdata.sgs.195/dados/ultimos/1?formato=json"
         response = requests.get(url)
         dados = response.json()
-        taxa_percentual = float(dados[0]['valor'])
-        return taxa_percentual / 100
-    except Exception as e:
-        return 0.005 # Fallback para 0.5% se a API falhar
+        return float(dados[0]['valor']) / 100
+    except:
+        return 0.005 # Fallback de segurança (0.5%) caso a API do BCB caia
 
 def calcular_saldo_devedor(dados):
+    """Calcula a amortização cronológica perfeita (suporta retroativos)"""
     data_inicial_obj = datetime.strptime(DATA_INICIAL, "%Y-%m-%d")
     data_atual = datetime.now()
-    
-    dias_passados = (data_atual - data_inicial_obj).days
-    dias_passados = max(0, dias_passados)
-    
     taxa_mensal = obter_taxa_poupanca()
     
-    # Cálculo Pró-rata e Juros
-    fator_juros = (1 + taxa_mensal) ** (dias_passados / 30.0)
-    saldo_com_juros = VALOR_INICIAL * fator_juros
+    saldo_atual = VALOR_INICIAL
+    data_ultimo_evento = data_inicial_obj
+    total_pago = 0
     
-    # NOVO: Isola apenas o valor dos juros gerados pelo tempo
-    juros_acumulados = saldo_com_juros - VALOR_INICIAL
-    
-    # Total pago e Saldo Final
-    total_pago = sum(p['valor'] for p in dados['pagamentos'])
-    
-    saldo_final = saldo_com_juros - total_pago
-    saldo_final = max(0, saldo_final) # Evita saldo negativo
-    
-    return saldo_final, total_pago, taxa_mensal, dias_passados, juros_acumulados
+    # 1. Ordena os pagamentos do mais antigo para o mais novo
+    if dados.get('pagamentos'):
+        pagamentos_ordenados = sorted(dados['pagamentos'], key=lambda x: datetime.strptime(x['data'], "%Y-%m-%d"))
+    else:
+        pagamentos_ordenados = []
 
-# --- FUNÇÃO DE E-MAIL ---
+    # 2. Viaja no tempo calculando juros e abatendo pagamentos nas datas exatas
+    for p in pagamentos_ordenados:
+        data_pagamento = datetime.strptime(p['data'], "%Y-%m-%d")
+        
+        # Travas de segurança para datas fora do escopo
+        if data_pagamento > data_atual:
+            data_pagamento = data_atual
+        data_pagamento = max(data_pagamento, data_inicial_obj)
+
+        # Calcula dias passados entre o último evento e ESTE pagamento
+        dias_juros = (data_pagamento - data_ultimo_evento).days
+        
+        if dias_juros > 0:
+            fator_juros = (1 + taxa_mensal) ** (dias_juros / 30.0)
+            saldo_atual = saldo_atual * fator_juros
+        
+        # Abate o pagamento do saldo corrigido até aquele dia
+        saldo_atual -= p['valor']
+        total_pago += p['valor']
+        
+        data_ultimo_evento = data_pagamento
+
+    # 3. Calcula os juros do dia do último pagamento até HOJE
+    dias_ate_hoje = (data_atual - data_ultimo_evento).days
+    if dias_ate_hoje > 0:
+        fator_juros = (1 + taxa_mensal) ** (dias_ate_hoje / 30.0)
+        saldo_atual = saldo_atual * fator_juros
+
+    # Evita saldo negativo se a dívida for super paga
+    saldo_final = max(0, saldo_atual)
+
+    # 4. Cálculo dos juros totais acumulados
+    juros_acumulados = saldo_final - VALOR_INICIAL + total_pago
+
+    # Dias passados totais para exibição
+    dias_passados_total = max(0, (data_atual - data_inicial_obj).days)
+
+    return saldo_final, total_pago, taxa_mensal, dias_passados_total, juros_acumulados
+
+# ==========================================
+# FUNÇÃO DE DISPARO DE E-MAIL
+# ==========================================
 def enviar_email_aviso(valor, data, comprovante_nome, comprovante_bytes):
     try:
         msg = EmailMessage()
@@ -75,7 +135,7 @@ def enviar_email_aviso(valor, data, comprovante_nome, comprovante_bytes):
         msg['From'] = EMAIL_REMETENTE
         msg['To'] = EMAIL_DESTINO
         
-        corpo = f"Olá,\n\nUm pagamento de {formata_moeda(valor)} foi registrado em {data}.\nComprovante em anexo."
+        corpo = f"Olá,\n\nUm pagamento de {formata_moeda(valor)} foi registrado na plataforma em {data}.\n\nO comprovante segue em anexo."
         msg.set_content(corpo)
         
         if comprovante_bytes:
@@ -89,21 +149,22 @@ def enviar_email_aviso(valor, data, comprovante_nome, comprovante_bytes):
         st.error(f"Erro ao enviar e-mail: {e}")
         return False
 
-# --- INTERFACE STREAMLIT ---
-# Mudamos para layout="wide" para aproveitar melhor a tela com as 3 colunas
+# ==========================================
+# INTERFACE DO USUÁRIO (STREAMLIT)
+# ==========================================
 st.set_page_config(page_title="Gestão de Dívida", page_icon="💰", layout="wide")
 
-st.title("💰 Gestão de Dívida")
+st.title("💰 Gestão de Amortização")
 
+# Carrega os dados direto da nuvem
 dados = carregar_dados()
-# Note que adicionamos a variável juros_acumulados aqui no retorno da função
-saldo_atual, total_pago, taxa_atual, dias_passados, juros_acumulados = calcular_saldo_devedor(dados)
 
+# Executa os cálculos
+saldo_atual, total_pago, taxa_atual, dias_passados, juros_acumulados = calcular_saldo_devedor(dados)
 data_inicial_br = datetime.strptime(DATA_INICIAL, "%Y-%m-%d").strftime("%d/%m/%Y")
 
-# --- DASHBOARD ATUALIZADO (3 Colunas) ---
+# --- DASHBOARD DE RESUMO ---
 st.markdown("### Resumo do Contrato")
-
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -115,52 +176,56 @@ with col2:
     st.success(f"**Total Amortizado:**\n## - {formata_moeda(total_pago)}")
 
 with col3:
-    st.error(f"**Início da Dívida:** {data_inicial_br}\n\n**Taxa Poupança:** {taxa_atual*100:.4f}% a.m.\n\n*Cobrança Pró-rata: {dias_passados} dias*")
+    st.error(f"**Início da Dívida:** {data_inicial_br}\n\n**Taxa Poupança Base:** {taxa_atual*100:.4f}% a.m.\n\n*Cobrança Pró-rata: {dias_passados} dias corridos*")
 
 st.divider()
 
-# --- FORMULÁRIO DE PAGAMENTO ---
+# --- FORMULÁRIO DE NOVO PAGAMENTO ---
 st.subheader("Registrar Novo Pagamento")
 with st.form("form_pagamento", clear_on_submit=True):
     col_a, col_b = st.columns(2)
     with col_a:
         valor_pago = st.number_input("Valor da Parcela (R$)", min_value=0.01, step=100.0)
     with col_b:
+        # Formato de data forçado para padrão brasileiro no calendário
         data_pagamento = st.date_input("Data do Pagamento", datetime.today(), format="DD/MM/YYYY")
         
     comprovante = st.file_uploader("Anexar Comprovante (PDF, JPG, PNG)", type=['pdf', 'jpg', 'jpeg', 'png'])
-    
-    submit = st.form_submit_button("Registrar e Enviar Aviso", use_container_width=True)
+    submit = st.form_submit_button("Registrar, Salvar e Enviar E-mail", use_container_width=True)
     
     if submit:
         if comprovante is not None:
             data_str_br = data_pagamento.strftime("%d/%m/%Y")
+            
+            # Envia email com o comprovante em anexo
             sucesso_email = enviar_email_aviso(valor_pago, data_str_br, comprovante.name, comprovante)
             
             if sucesso_email:
                 novo_pagamento = {
-                    "data": data_pagamento.strftime("%Y-%m-%d"),
+                    "data": data_pagamento.strftime("%Y-%m-%d"), # Salva no BD em padrão universal
                     "valor": float(valor_pago),
                     "comprovante": comprovante.name
                 }
                 dados['pagamentos'].append(novo_pagamento)
-                salvar_dados(dados)
+                salvar_dados(dados) # Salva na nuvem do JSONBin
                 
                 st.success("Pagamento registrado com sucesso!")
                 st.rerun()
         else:
-            st.warning("Por favor, anexe o comprovante de pagamento.")
+            st.warning("Por favor, anexe o comprovante de pagamento antes de registrar.")
 
 st.divider()
 
-# --- HISTÓRICO DE PAGAMENTOS ---
+# --- TABELA DE HISTÓRICO ---
 st.subheader("Histórico de Amortizações")
-if dados['pagamentos']:
+if dados.get('pagamentos'):
+    # Ordena o DataFrame para mostrar do mais recente para o mais antigo na interface
     df = pd.DataFrame(dados['pagamentos'])
+    df = df.sort_values(by='data', ascending=False)
     
+    # Formatações visuais da tabela
     df['data'] = pd.to_datetime(df['data']).dt.strftime('%d/%m/%Y')
     df['valor'] = df['valor'].apply(formata_moeda)
-    
     df.rename(columns={'data': 'Data do Pagamento', 'valor': 'Valor Amortizado', 'comprovante': 'Arquivo Anexado'}, inplace=True)
     
     st.dataframe(df, use_container_width=True, hide_index=True)
